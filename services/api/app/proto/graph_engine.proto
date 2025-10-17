@@ -1,0 +1,24 @@
+syntax = "proto3";
+package graph;
+
+message Node { string id=1; int64 ts=2; string type=3; map<string,string> attrs=4; }
+message Edge { string src=1; string dst=2; double weight=3; int64 ts=4; string type=5; map<string,string> attrs=6; }
+
+message UpsertNodesRequest { repeated Node nodes = 1; }
+message UpsertEdgesRequest { repeated Edge edges = 1; }
+message Ack { bool ok = 1; }
+
+message TimeWindow { int64 start_ms=1; int64 end_ms=2; }
+message ExpandRequest { repeated string seed_ids=1; TimeWindow window=2; uint32 max_hops=3; }
+message GraphFragment { repeated Node nodes=1; repeated Edge edges=2; }
+
+message CommunitiesRequest { TimeWindow window=1; }
+message CommunityLabel { string node_id=1; uint32 community=2; }
+message CommunitiesResponse { repeated CommunityLabel labels=1; }
+
+service GraphEngine {
+  rpc UpsertNodes(UpsertNodesRequest) returns (Ack);
+  rpc UpsertEdges(UpsertEdgesRequest) returns (Ack);
+  rpc ExpandTimeWindow(ExpandRequest) returns (GraphFragment);
+  rpc CommunitiesLouvain(CommunitiesRequest) returns (CommunitiesResponse);
+}
