@@ -40,7 +40,6 @@ export async function expandGraph(payload: ExpandRequest): Promise<{
   nodes: GraphNode[];
   edges: GraphEdge[];
 }> {
-  // Your FastAPI handler should return { nodes, edges }
   const { data } = await api.post("/graph/expand", payload);
   return data;
 }

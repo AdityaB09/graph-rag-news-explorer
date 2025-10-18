@@ -1,59 +1,41 @@
 // services/frontend/pages/index.tsx
 import { useEffect, useMemo, useState } from "react";
-import useSWR from "swr";
 import dayjs from "dayjs";
 import GraphVis from "../components/GraphVis";
 import TimelineChart, { Point } from "../components/TimelineChart";
+import IngestPanel from "../components/IngestPanel";
 import { expandGraph, getHealth, GraphEdge, GraphNode } from "../lib/api";
 
-const seedPresets = [
-  "ent:TATA",
-  "ent:FOX",
-  "doc:1",
-];
+const seedPresets = ["ent:TATA", "ent:FOX", "doc:1"];
 
 function toPointsFromEdges(edges: GraphEdge[], start?: number, end?: number): Point[] {
-  // Aggregate edge counts per day (based on ts). If ts missing, return empty.
   const buckets = new Map<string, number>();
   edges.forEach((e) => {
     if (!e.ts) return;
     const d = dayjs(e.ts).startOf("day").toISOString();
     buckets.set(d, (buckets.get(d) ?? 0) + 1);
   });
-
   const times = [...buckets.keys()].sort();
   const pts = times.map((iso) => ({ t: +new Date(iso), v: buckets.get(iso)! }));
-
-  // If no timestamps, synthesize a flat series so the chart isn't empty
   if (pts.length === 0) {
     const base = dayjs().subtract(6, "day");
-    return Array.from({ length: 7 }, (_, i) => ({
-      t: base.add(i, "day").valueOf(),
-      v: 0,
-    }));
+    return Array.from({ length: 7 }, (_, i) => ({ t: base.add(i, "day").valueOf(), v: 0 }));
   }
   return pts;
 }
 
 export default function Home() {
   const [apiOk, setApiOk] = useState<boolean>(false);
-
-  // Controls
   const [seed, setSeed] = useState<string>("ent:TATA");
   const [maxHops, setMaxHops] = useState<number>(2);
   const [days, setDays] = useState<number>(14);
-
-  // Graph data
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Health poll (once)
   useEffect(() => {
-    getHealth()
-      .then((x) => setApiOk(!!x.ok))
-      .catch(() => setApiOk(false));
+    getHealth().then((x) => setApiOk(!!x.ok)).catch(() => setApiOk(false));
   }, []);
 
   const endMs = useMemo(() => dayjs().endOf("day").valueOf(), []);
@@ -65,11 +47,7 @@ export default function Home() {
       label: n.attrs?.name ?? n.attrs?.title ?? n.id,
       group: n.type,
     }));
-    const graphEdges = edges.map((e) => ({
-      from: e.src,
-      to: e.dst,
-      label: e.type,
-    }));
+    const graphEdges = edges.map((e) => ({ from: e.src, to: e.dst, label: e.type }));
     return { nodes: graphNodes, edges: graphEdges };
   }, [nodes, edges]);
 
@@ -95,7 +73,6 @@ export default function Home() {
   }
 
   useEffect(() => {
-    // kick off once with default seed so users see results
     runExpand();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -107,6 +84,8 @@ export default function Home() {
         API status: <strong>{apiOk ? "ok" : "down"}</strong>
       </p>
 
+      <IngestPanel />
+
       <div
         style={{
           display: "grid",
@@ -117,7 +96,7 @@ export default function Home() {
       >
         <div>
           <div style={{ padding: 16, border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16 }}>
-            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Controls</h3>
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Expand Graph</h3>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
               <div style={{ gridColumn: "span 3" }}>
@@ -191,11 +170,7 @@ export default function Home() {
               </div>
             </div>
 
-            {err && (
-              <div style={{ marginTop: 12, color: "#b91c1c", fontSize: 14 }}>
-                {err}
-              </div>
-            )}
+            {err && <div style={{ marginTop: 12, color: "#b91c1c", fontSize: 14 }}>{err}</div>}
           </div>
 
           <div style={{ padding: 16, border: "1px solid #e5e7eb", borderRadius: 12 }}>
