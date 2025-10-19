@@ -1,38 +1,23 @@
 FROM python:3.11-slim
 
-# Build deps for pybind11 + gumbo + gRPC tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git curl pkg-config \
-    libgumbo-dev \
-    libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
-    libgrpc++-dev \
-    && rm -rf /var/lib/apt/lists/*
+    curl ca-certificates build-essential \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Python deps
+# deps
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Build htmlfast (pybind11 + Gumbo)
-COPY app/htmlfast /app/htmlfast
-WORKDIR /app/htmlfast
-RUN chmod +x ./build.sh && ./build.sh
+# ✅ Pin the spaCy English model by URL (works reliably in containers)
+#   This version matches spacy==3.7.x in requirements.txt
+RUN pip install --no-cache-dir \
+  https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
-# Return to /app; ensure Python can import
-WORKDIR /app
-ENV PYTHONPATH="/app:/app/app:/app/htmlfast:${PYTHONPATH}"
-
-
-# API code
+# app
 COPY app /app/app
 
-# Generate Python gRPC stubs (client)
-RUN python -m grpc_tools.protoc \
-    -I/app/app/proto \
-    --python_out=/app/app \
-    --grpc_python_out=/app/app \
-    /app/app/proto/graph_engine.proto
+ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8080
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

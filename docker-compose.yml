@@ -4,27 +4,30 @@ services:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./services/api/app/models.sql:/docker-entrypoint-initdb.d/00_models.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
-    ports: ["5432:5432"]
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./services/api/app/models.sql:/docker-entrypoint-initdb.d/00_models.sql:ro
 
   opensearch:
-    image: opensearchproject/opensearch:2.14.0
+    image: opensearchproject/opensearch:2.11.0
     environment:
-      discovery.type: single-node
-      plugins.security.disabled: "true"
-      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS}
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    ports: ["9200:9200"]
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=unused
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
 
   minio:
     image: minio/minio:latest
@@ -32,17 +35,31 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: server /data --console-address ":9001"
-    ports: ["9000:9000", "9001:9001"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   redis:
     image: redis:7
-    ports: ["6379:6379"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   graph-engine:
     build: ./services/graph_engine
-    ports: ["50061:50061"]
+    ports:
+      - "50061:50061"
 
   api:
     build: ./services/api
@@ -54,31 +71,44 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       GRAPH_ENGINE_ADDR: graph-engine:50061
-    ports: ["8080:8080"]
+      # (optional) to make local debugging imports easier
+      PYTHONPATH: /app
+    ports:
+      - "8080:8080"
     depends_on:
-      - postgres
-      - opensearch
-      - redis
-      - minio
-      - graph-engine
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      graph-engine:
+        condition: service_started
 
   worker:
-    image: graph-rag-news-explorer-api:latest   # reuse the API image we build once
+    image: graph-rag-news-explorer-api:latest   # reuse the API image
+    working_dir: /app
     command: bash -lc "rq worker default"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     depends_on:
-      - redis
-      - api
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
 
   frontend:
     build: ./services/frontend
-    ports: ["3000:3000"]
+    ports:
+      - "3000:3000"
     environment:
-     - NEXT_PUBLIC_API_URL=http://localhost:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8080
     depends_on:
-      - api
-
+      api:
+        condition: service_started
 
 volumes:
   pgdata: {}

@@ -1,48 +1,43 @@
+# services/api/app/schemas.py
+from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
+class Health(BaseModel):
+    status: str = "ok"
 
-class HealthResponse(BaseModel):
-    ok: bool
-    services: Dict[str, str]
+class IngestTopicRequest(BaseModel):
+    topic: str
 
+class IngestRssRequest(BaseModel):
+    rss_url: str
 
-class ExpandRequest(BaseModel):
-    # what the UI sends
-    seed_ids: List[str] = Field(default_factory=list)
-    max_hops: int = 2
-    # your engine proto appears to use window_days rather than start/end
-    window_days: Optional[int] = 14
-    # keep these in case your UI still posts them; we just ignore them
-    start_ms: Optional[int] = None
-    end_ms: Optional[int] = None
+class IngestUrlRequest(BaseModel):
+    url: str
 
+class JobCreateResponse(BaseModel):
+    job_id: str
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    result: Dict[str, Any] | None = None
 
 class GraphNode(BaseModel):
     id: str
-    type: str
-    attrs: Dict[str, Any] = {}
-
+    label: str
+    type: str  # "ent"|"doc"
 
 class GraphEdge(BaseModel):
-    src: str
-    dst: str
-    type: str
-    ts: Optional[str] = None
+    source: str
+    target: str
+    label: str
 
+class ExpandRequest(BaseModel):
+    seed_ids: List[str] = Field(default_factory=list)
+    max_hops: int = 2
+    window_days: int = 14
 
-class GraphResponse(BaseModel):
+class ExpandResponse(BaseModel):
     nodes: List[GraphNode]
     edges: List[GraphEdge]
-
-
-class IngestTopic(BaseModel):
-    topic: str
-
-
-class IngestRss(BaseModel):
-    url: str
-
-
-class IngestUrl(BaseModel):
-    url: str

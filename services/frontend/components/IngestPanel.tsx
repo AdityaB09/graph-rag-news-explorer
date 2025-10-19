@@ -1,129 +1,58 @@
 // services/frontend/components/IngestPanel.tsx
-"use client";
-
 import { useState } from "react";
-import axios from "axios";
-
-const API_BASE =
-  (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080").replace(/\/+$/, "");
-
-async function enqueue(endpoint: string, payload: any) {
-  const { data } = await axios.post(`${API_BASE}${endpoint}`, payload, {
-    headers: { "Content-Type": "application/json" },
-  });
-  return data as { job_id: string };
-}
-
-async function check(job_id: string) {
-  const { data } = await axios.get(`${API_BASE}/jobs/${job_id}`);
-  return data as { id: string; status: string; result_count?: number; error?: string };
-}
+import { ingestTopic, ingestRss, ingestUrl, jobStatus } from "../lib/api";
 
 export default function IngestPanel() {
   const [topic, setTopic] = useState("apple supply chain");
-  const [rss, setRss] = useState("https://news.google.com/rss/search?q=india%20manufacturing");
+  const [rssUrl, setRssUrl] = useState("https://news.google.com/rss/search?q=india%20manufacturing");
   const [url, setUrl] = useState("https://example.com/article.html");
-  const [log, setLog] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [lastMsg, setLastMsg] = useState<string>("");
 
-  async function run(kind: "search" | "rss" | "url") {
-    setLoading(true);
-    setLog([]);
+  async function runAndPoll(promise: Promise<{ job_id: string }>) {
+    setLastMsg("Queued…");
     try {
-      let body: any, ep: string;
-      if (kind === "search") {
-        ep = "/ingest/search";
-        body = { query: topic, limit: 20 };
-      } else if (kind === "rss") {
-        ep = "/ingest/rss";
-        body = { rss_url: rss, limit: 30 };
+      const { job_id } = await promise;
+      // simple short poll for demo (usually you’d poll until done)
+      const s1 = await jobStatus(job_id);
+      if (s1.status === "done") {
+        setLastMsg(`Done. Ingested ${s1.result?.ingested?.length || 0} item(s).`);
       } else {
-        ep = "/ingest/url";
-        body = { url };
-      }
-      const { job_id } = await enqueue(ep, body);
-      setLog((l) => [...l, `Enqueued: ${job_id}`]);
-
-      // simple poll loop
-      let status = "queued";
-      let tries = 0;
-      while (["queued", "started", "deferred"].includes(status) && tries < 90) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const s = await check(job_id);
-        status = s.status;
-        setLog((l) => [...l, `Status: ${status}${s.result_count ? ` (${s.result_count})` : ""}`]);
-        if (status === "failed") {
-          setLog((l) => [...l, `Error: ${s.error || "unknown"}`]);
-          break;
-        }
-        tries++;
-      }
-
-      if (status === "finished") {
-        setLog((l) => [...l, "Done! Refresh your graph (Run)."]);
+        setLastMsg(`Status: ${s1.status} (try again)`);
       }
     } catch (e: any) {
-      setLog((l) => [...l, `Error: ${e?.message || e}`]);
-    } finally {
-      setLoading(false);
+      setLastMsg(`Error: ${e?.response?.status || ""} ${e?.message || e}`);
     }
   }
 
   return (
-    <div style={{ padding: 16, border: "1px solid #e5e7eb", borderRadius: 12, marginBottom: 16 }}>
-      <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Ingest News</h3>
+    <div className="card">
+      <h3>Ingest News</h3>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8, alignItems: "center" }}>
-        <input
-          value={topic}
-          onChange={(e) => setTopic(e.target.value)}
-          placeholder="topic (uses Google News RSS)"
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #d1d5db" }}
-        />
-        <button
-          onClick={() => run("search")}
-          disabled={loading}
-          style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #2563eb", background: "#3b82f6", color: "white", fontWeight: 600 }}
-        >
-          {loading ? "Working..." : "Fetch Topic"}
-        </button>
+      <div className="row">
+        <input value={topic} onChange={(e) => setTopic(e.target.value)} />
+        <button onClick={() => runAndPoll(ingestTopic(topic))}>Fetch Topic</button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8, alignItems: "center", marginTop: 8 }}>
-        <input
-          value={rss}
-          onChange={(e) => setRss(e.target.value)}
-          placeholder="RSS feed URL"
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #d1d5db" }}
-        />
-        <button
-          onClick={() => run("rss")}
-          disabled={loading}
-          style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #2563eb", background: "#3b82f6", color: "white", fontWeight: 600 }}
-        >
-          {loading ? "Working..." : "Fetch RSS"}
-        </button>
+      <div className="row">
+        <input value={rssUrl} onChange={(e) => setRssUrl(e.target.value)} />
+        <button onClick={() => runAndPoll(ingestRss(rssUrl))}>Fetch RSS</button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 8, alignItems: "center", marginTop: 8 }}>
-        <input
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="Single article URL"
-          style={{ padding: 10, borderRadius: 8, border: "1px solid #d1d5db" }}
-        />
-        <button
-          onClick={() => run("url")}
-          disabled={loading}
-          style={{ padding: "10px 12px", borderRadius: 8, border: "1px solid #2563eb", background: "#3b82f6", color: "white", fontWeight: 600 }}
-        >
-          {loading ? "Working..." : "Fetch URL"}
-        </button>
+      <div className="row">
+        <input value={url} onChange={(e) => setUrl(e.target.value)} />
+        <button onClick={() => runAndPoll(ingestUrl(url))}>Fetch URL</button>
       </div>
 
-      <pre style={{ marginTop: 12, padding: 12, background: "#f9fafb", borderRadius: 8, maxHeight: 200, overflow: "auto" }}>
-        {log.join("\n")}
-      </pre>
+      <p style={{ color: lastMsg.startsWith("Error") ? "crimson" : "#333" }}>
+        {lastMsg}
+      </p>
+
+      <style jsx>{`
+        .card { padding: 12px; border: 1px solid #eee; border-radius: 8px; }
+        .row { display: grid; grid-template-columns: 1fr 160px; gap: 8px; margin-top: 8px; }
+        input { padding: 8px; border: 1px solid #ddd; border-radius: 6px; }
+        button { background: #377dff; color: white; border: 0; padding: 8px 12px; border-radius: 6px; }
+      `}</style>
     </div>
   );
 }

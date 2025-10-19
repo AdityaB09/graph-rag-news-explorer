@@ -1,19 +1,17 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
+requests==2.32.3
+trafilatura==1.12.1
+feedparser==6.0.11
+beautifulsoup4==4.12.3
 spacy==3.7.4
 sentence-transformers==3.0.1
 faiss-cpu==1.8.0.post1
-psycopg2-binary==2.9.9
 sqlalchemy==2.0.35
-trafilatura==1.12.1
-feedparser==6.0.11
+psycopg2-binary==2.9.9
 opensearch-py==2.6.0
-redis==5.0.8
-rq==1.16.2
-minio==7.2.7
-pybind11==2.13.1
-grpcio==1.65.5
-grpcio-tools==1.65.5
 python-dotenv==1.0.1
-# htmlfast is built locally by C++ step above
+starlette==0.38.5
+rq==1.16.1
+
