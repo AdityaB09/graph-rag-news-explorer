@@ -7,7 +7,7 @@ from sqlalchemy import (
     create_engine, text as sa_text, func,
     Column, Integer, String, Text, DateTime, ForeignKey, select, desc, UniqueConstraint, insert, update
 )
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 DATABASE_URL = os.environ.get(
@@ -24,8 +24,7 @@ Base = declarative_base()
 
 class Document(Base):
     __tablename__ = "documents"
-    # UUID primary key
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)  # UUID PK
     url = Column(Text, unique=True, nullable=False)
     title = Column(Text, nullable=True)
     source = Column(Text, nullable=True)
@@ -49,7 +48,6 @@ class Entity(Base):
 class DocEntity(Base):
     __tablename__ = "doc_entities"
     id = Column(Integer, primary_key=True)
-    # FK to UUID documents.id (matches Document.id type)
     doc_id = Column(PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     ent_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
     relation = Column(String(50), nullable=False)
@@ -70,7 +68,7 @@ def init_schema() -> None:
     with engine.begin() as conn:
         Base.metadata.create_all(bind=conn)
 
-        # Ensure 'source' and 'text' exist (no-op if already present)
+        # Ensure 'source' and 'text' columns exist on documents
         conn.execute(sa_text("""
             DO $$
             BEGIN
@@ -138,36 +136,36 @@ def upsert_document(
         return new_id
 
 
-def upsert_entity(s: Session, name: str, etype: str | None = None) -> int:
+def upsert_entity(name: str, etype: str | None = None) -> int:
     """
     Ensure an entity row exists; return its integer id.
-    Accepts the two positional args the worker sends.
+    Sessionless: opens its own session so callers can just pass (name, etype).
     """
-    row = s.execute(select(Entity).where(Entity.name == name)).scalar_one_or_none()
-    if row:
-        # optionally update type if provided
-        if etype and getattr(row, "type", None) != etype:
-            s.execute(
-                update(Entity)
-                .where(Entity.id == row.id)
-                .values(type=etype)
-            )
-            s.flush()
-        return row.id
+    with SessionLocal() as s:
+        row = s.scalars(select(Entity).where(Entity.name == name)).first()
+        if row:
+            if etype and getattr(row, "type", None) != etype:
+                s.execute(
+                    update(Entity)
+                    .where(Entity.id == row.id)
+                    .values(type=etype)
+                )
+                s.flush()
+                s.commit()
+            return row.id
 
-    ins = (
-        insert(Entity)
-        .values(name=name, type=etype)
-        .returning(Entity.id)
-    )
-    new_id = s.execute(ins).scalar_one()
-    s.flush()
-    return new_id
+        new_id = s.execute(
+            insert(Entity).values(name=name, type=etype).returning(Entity.id)
+        ).scalar_one()
+        s.flush()
+        s.commit()
+        return new_id
 
 
-def link_doc_entity(*, doc_id: uuid.UUID, ent_id: int, relation: str) -> None:
+def link_doc_entity(doc_id: uuid.UUID, ent_id: int, relation: str) -> None:
     """
     Create a (doc, entity, relation) link if it doesn't already exist.
+    Accepts positional args to match main.py calls.
     """
     rel = (relation or "").strip() or "mentions"
     with SessionLocal() as s:
@@ -197,7 +195,7 @@ def expand_graph(seed_ids: List[str], window_days: int = 30) -> Tuple[list, list
     edges: list = []
 
     with SessionLocal() as s:
-        # Recent documents
+        # Recent documents (ignore NULL published_at)
         docs = s.scalars(
             select(Document)
             .where((Document.published_at.is_not(None)) & (Document.published_at >= since))
@@ -249,7 +247,7 @@ def expand_graph(seed_ids: List[str], window_days: int = 30) -> Tuple[list, list
             edges.append({
                 "source": f"doc:{doc_id}",
                 "target": f"ent:{ent_name.upper()}",
-                "label": "mentions",   # <-- required by GraphEdge schema
+                "label": "mentions",   # required by GraphEdge schema
             })
 
     return nodes, edges
