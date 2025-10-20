@@ -1,89 +1,89 @@
-// services/frontend/components/IngestPanel.tsx
-import { useState } from "react";
+// /services/ui/src/IngestPanel.tsx
+import React, { useState } from "react";
 
-const API = "http://localhost:8080";
-async function jget<T>(path: string) {
-  const r = await fetch(`${API}${path}`);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return (await r.json()) as T;
-}
-async function jpost<T>(path: string, body: any) {
-  const r = await fetch(`${API}${path}`, {
+type Props = { apiBase: string };
+
+async function submitJob(apiBase: string, path: string, body: any) {
+  const r = await fetch(`${apiBase}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  return (await r.json()) as T;
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (await r.json()) as { job_id: string };
 }
 
-export default function IngestPanel() {
-  const [topic, setTopic] = useState("apple supply chain");
-  const [rssUrl, setRssUrl] = useState("https://news.google.com/rss/search?q=india%20manufacturing");
-  const [url, setUrl] = useState("https://example.com/article.html");
-  const [lastMsg, setLastMsg] = useState<string>("");
-
-  async function runAndPoll(kind: "topic" | "rss" | "url") {
-    setLastMsg("Queued…");
-    try {
-      let path = "";
-      let body: any = {};
-      if (kind === "topic") { path = "/ingest/topic"; body = { topic }; }
-      if (kind === "rss")   { path = "/ingest/rss";   body = { rss_url: rssUrl }; }
-      if (kind === "url")   { path = "/ingest/url";   body = { url }; }
-
-      const { job_id } = await jpost<{ job_id: string }>(path, body);
-
-      // poll
-      let tries = 0;
-      while (tries < 300) {
-        tries++;
-        const j = await jget<{ job_id: string; status: string; result: any }>(`/jobs/${job_id}`);
-        if (j.status === "done") {
-          setLastMsg(`Done. Ingested ${j.result?.ingested?.length || 0} item(s).`);
-          return;
-        }
-        if (j.status === "error") {
-          setLastMsg(`Error: ${JSON.stringify(j.result)}`);
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      setLastMsg("Timeout polling job.");
-    } catch (e: any) {
-      setLastMsg(`Error: ${e?.message || e}`);
-    }
+async function pollJob(apiBase: string, jobId: string) {
+  while (true) {
+    const r = await fetch(`${apiBase}/jobs/${jobId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    if (j.status === "done" || j.status === "error") return j;
+    await new Promise((res) => setTimeout(res, 1000));
   }
+}
+
+export default function IngestPanel({ apiBase }: Props) {
+  const [topic, setTopic] = useState<string>("apple supply chain");
+  const [rss, setRss] = useState<string>("https://news.google.com/rss/search?q=india%20manufacturing");
+  const [url, setUrl] = useState<string>("https://example.com/article.html");
+  const [status, setStatus] = useState<string>("");
+
+  const run = async (kind: "topic" | "rss" | "url") => {
+    try {
+      setStatus("queued (try again)");
+      const payload =
+        kind === "topic"
+          ? { topic }
+          : kind === "rss"
+          ? { rss_url: rss }
+          : { url };
+      const path =
+        kind === "topic" ? "/ingest/topic" : kind === "rss" ? "/ingest/rss" : "/ingest/url";
+
+      const { job_id } = await submitJob(apiBase, path, payload);
+      const result = await pollJob(apiBase, job_id);
+      if (result.status === "done") {
+        setStatus(`done (ingested ${result?.result?.ingested?.length ?? 0})`);
+      } else {
+        setStatus(`error: ${result?.result?.error ?? "unknown"}`);
+      }
+    } catch (e: any) {
+      setStatus(`error: ${e?.message || "request failed"}`);
+    } finally {
+      // Auto-clear after a bit so the panel doesn't look "stuck"
+      setTimeout(() => setStatus(""), 4000);
+    }
+  };
 
   return (
-    <div className="card">
-      <h3>Ingest News</h3>
+    <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
+      <h2 style={{ marginTop: 0 }}>Ingest News</h2>
 
-      <div className="row">
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
         <input value={topic} onChange={(e) => setTopic(e.target.value)} />
-        <button onClick={() => runAndPoll("topic")}>Fetch Topic</button>
-      </div>
+        <button onClick={() => run("topic")} style={btnPrimary}>Fetch Topic</button>
 
-      <div className="row">
-        <input value={rssUrl} onChange={(e) => setRssUrl(e.target.value)} />
-        <button onClick={() => runAndPoll("rss")}>Fetch RSS</button>
-      </div>
+        <input value={rss} onChange={(e) => setRss(e.target.value)} />
+        <button onClick={() => run("rss")} style={btnPrimary}>Fetch RSS</button>
 
-      <div className="row">
         <input value={url} onChange={(e) => setUrl(e.target.value)} />
-        <button onClick={() => runAndPoll("url")}>Fetch URL</button>
+        <button onClick={() => run("url")} style={btnPrimary}>Fetch URL</button>
       </div>
 
-      <p style={{ color: lastMsg.startsWith("Error") ? "crimson" : "#333" }}>
-        {lastMsg}
-      </p>
-
-      <style jsx>{`
-        .card { padding: 12px; border: 1px solid #eee; border-radius: 8px; }
-        .row { display: grid; grid-template-columns: 1fr 160px; gap: 8px; margin-top: 8px; }
-        input { padding: 8px; border: 1px solid #ddd; border-radius: 6px; }
-        button { background: #377dff; color: white; border: 0; padding: 8px 12px; border-radius: 6px; }
-      `}</style>
+      <div style={{ marginTop: 12, color: status.startsWith("error") ? "#b00020" : "#555" }}>
+        {status ? `Status: ${status}` : null}
+      </div>
     </div>
   );
 }
+
+const btnPrimary: React.CSSProperties = {
+  appearance: "none",
+  border: "1px solid #2f6df6",
+  background: "#2f6df6",
+  color: "#fff",
+  borderRadius: 6,
+  padding: "8px 12px",
+  cursor: "pointer",
+};
