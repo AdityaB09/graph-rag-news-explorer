@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "d3": "^7.9.0",
+    "echarts-for-react": "^3.0.2",
+    "react-error-boundary": "^6.0.0",
+    "use-resize-observer": "^9.1.0",
+    "zod": "^4.1.12"
+  }
+}

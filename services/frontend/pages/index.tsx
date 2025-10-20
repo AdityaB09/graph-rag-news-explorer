@@ -3,9 +3,10 @@ import React, { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 
 // Client-only components
-const IngestPanel = dynamic(() => import("../components/IngestPanel"), { ssr: false });
-const ExpandPanel = dynamic(() => import("../components/ExpandPanel"), { ssr: false });
-const GraphVis    = dynamic(() => import("../components/GraphVis"), { ssr: false });
+const IngestPanel  = dynamic(() => import("../components/IngestPanel"),  { ssr: false });
+const ExpandPanel  = dynamic(() => import("../components/ExpandPanel"),  { ssr: false });
+const GraphSummary = dynamic(() => import("../components/GraphSummary"), { ssr: false });
+const GraphVis     = dynamic(() => import("../components/GraphVis"),     { ssr: false });
 
 type Health = { status: "ok" };
 type AdminStats = {
@@ -119,7 +120,13 @@ export default function HomePage() {
   }, []);
 
   return (
-    <div style={{ padding: 20, fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial" }}>
+    <div
+      style={{
+        padding: 20,
+        fontFamily:
+          "Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial",
+      }}
+    >
       <div style={{ marginBottom: 8 }}>
         <b>API status:</b>{" "}
         <span style={{ color: health === "ok" ? "#0a7a0a" : "#b00020" }}>
@@ -128,15 +135,24 @@ export default function HomePage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
+        {/* Left column */}
         <div>
           <IngestPanel apiBase={API} />
           <AdminPanel />
         </div>
 
-        <div style={{ display: "grid", gridTemplateRows: "auto 1fr", gap: 16 }}>
+        {/* Right column */}
+        <div style={{ display: "grid", gap: 16 }}>
           <ExpandPanel apiBase={API} onResult={setExpandData} />
+
+          {/* Summary card */}
           <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
-            <GraphVis apiBase={API} data={expandData} />
+            <GraphSummary data={expandData} />
+          </div>
+
+          {/* Graph card – explicit height so it always shows */}
+          <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 0, minHeight: 540 }}>
+            <GraphVis data={expandData} height={540} />
           </div>
         </div>
       </div>
