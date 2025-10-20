@@ -1,21 +1,27 @@
-# app/config.py
+import os
 
-from typing import Final, Set
+OPENSEARCH_URL: str = os.getenv("OPENSEARCH_URL", "http://opensearch:9200")
+OPENSEARCH_USER: str | None = os.getenv("OPENSEARCH_USER") or None
+OPENSEARCH_PASSWORD: str | None = os.getenv("OPENSEARCH_PASSWORD") or None
 
-# Entities you never want to show in the graph (sources, boilerplate, etc.)
-ENTITY_BLACKLIST: Final[Set[str]] = {
-    "GOOGLE NEWS",
-    "RSS", "HTTP", "HTTPS",
-    "WWW",
-}
+DATABASE_URL: str = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@postgres:5432/postgres",
+)
 
-# Prefer these entity types when scoring or selecting "about" relations.
-# Typical spaCy / custom NER tags (ORG, PRODUCT, GPE for places used as org HQs)
-PREFERRED_ENTITY_TYPES: Final[Set[str]] = {"ORG", "PRODUCT", "GPE"}
+REDIS_URL: str | None = os.getenv("REDIS_URL") or None
+REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+REDIS_PASSWORD: str | None = os.getenv("REDIS_PASSWORD") or None
 
-# Minimum shared-entity count to create a doc<->doc "related" edge
-RELATED_DOC_MIN_SHARED: Final[int] = 3
+GRAPH_ENGINE_ADDR: str = os.getenv("GRAPH_ENGINE_ADDR", "graph-engine:50061")
 
-# Cap graph size to keep UI snappy (you can raise if needed)
-MAX_NODES: Final[int] = 250
-MAX_EDGES: Final[int] = 1200
+CORS_ORIGINS = [
+    o.strip()
+    for o in (os.getenv("CORS_ORIGINS") or "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
+
+ENV: str = os.getenv("ENV", "dev")
+DEBUG: bool = os.getenv("DEBUG", "0") in ("1", "true", "True")

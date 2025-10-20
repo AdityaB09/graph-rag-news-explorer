@@ -1,30 +1,45 @@
+# app/db.py
 import os
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any, Iterable
 
 from sqlalchemy import (
     create_engine, text as sa_text, func,
     Column, Integer, String, Text, DateTime, ForeignKey, select, desc, UniqueConstraint, insert, update
 )
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
+
+
+# --------------------------------------------------------------------------------------
+# Engine / Session setup
+# --------------------------------------------------------------------------------------
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres:postgres@postgres:5432/postgres",
 )
 
+# NOTE: pool_pre_ping=True avoids broken connections; future=True enables 2.0 style.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
+
+# ORM session factory
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
 Base = declarative_base()
 
 
-# ----------------------- Models -----------------------
+# --------------------------------------------------------------------------------------
+# Models
+# --------------------------------------------------------------------------------------
 
 class Document(Base):
     __tablename__ = "documents"
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)  # UUID PK
+    # UUID primary key
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     url = Column(Text, unique=True, nullable=False)
     title = Column(Text, nullable=True)
     source = Column(Text, nullable=True)
@@ -48,6 +63,7 @@ class Entity(Base):
 class DocEntity(Base):
     __tablename__ = "doc_entities"
     id = Column(Integer, primary_key=True)
+    # FK to UUID documents.id (matches Document.id type)
     doc_id = Column(PG_UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     ent_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
     relation = Column(String(50), nullable=False)
@@ -58,7 +74,9 @@ class DocEntity(Base):
     entity = relationship("Entity", back_populates="docs")
 
 
-# ------------------- Schema bootstrap -------------------
+# --------------------------------------------------------------------------------------
+# Schema bootstrap
+# --------------------------------------------------------------------------------------
 
 def init_schema() -> None:
     """
@@ -68,7 +86,8 @@ def init_schema() -> None:
     with engine.begin() as conn:
         Base.metadata.create_all(bind=conn)
 
-        # Ensure 'source' and 'text' columns exist on documents
+        # Ensure 'source' and 'text' exist (no-op if already present).
+        # This DO $$ block is Postgres-specific; ok because default URL uses Postgres.
         conn.execute(sa_text("""
             DO $$
             BEGIN
@@ -89,7 +108,59 @@ def init_schema() -> None:
         """))
 
 
-# ------------------ Upsert helpers used by API/worker ------------------
+# --------------------------------------------------------------------------------------
+# Low-level compatibility helpers (for legacy code paths)
+# --------------------------------------------------------------------------------------
+
+def get_conn() -> Connection:
+    """
+    Return a SQLAlchemy Connection that supports `.execute(...)`.
+    Use in a short-lived context; prefer `with engine.begin() as conn:` if doing writes.
+    """
+    return engine.connect()
+
+
+def run(sql: str, params: Optional[dict | Iterable[Any]] = None) -> None:
+    """
+    Execute a write (INSERT/UPDATE/DDL) in a transaction. Autocommits/rolls back.
+    `params` can be a dict or a tuple/list for positional binds.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text(sql), params or {})
+    except SQLAlchemyError as e:
+        # Re-raise with context for easier debugging in logs
+        raise RuntimeError(f"[db.run] Error executing SQL: {e}") from e
+
+
+def fetch_all(sql: str, params: Optional[dict | Iterable[Any]] = None) -> list[tuple]:
+    """
+    Execute a read query and return all rows as a list of tuples.
+    """
+    try:
+        with engine.connect() as conn:
+            res = conn.execute(sa_text(sql), params or {})
+            return [tuple(row) for row in res.fetchall()]
+    except SQLAlchemyError as e:
+        raise RuntimeError(f"[db.fetch_all] Error executing SQL: {e}") from e
+
+
+def fetch_one(sql: str, params: Optional[dict | Iterable[Any]] = None) -> Optional[tuple]:
+    """
+    Execute a read query and return a single row as a tuple (or None).
+    """
+    try:
+        with engine.connect() as conn:
+            res = conn.execute(sa_text(sql), params or {})
+            row = res.fetchone()
+            return tuple(row) if row is not None else None
+    except SQLAlchemyError as e:
+        raise RuntimeError(f"[db.fetch_one] Error executing SQL: {e}") from e
+
+
+# --------------------------------------------------------------------------------------
+# Upsert helpers used by API/worker
+# --------------------------------------------------------------------------------------
 
 def upsert_document(
     *,
@@ -136,36 +207,36 @@ def upsert_document(
         return new_id
 
 
-def upsert_entity(name: str, etype: str | None = None) -> int:
+def upsert_entity(s: Session, name: str, etype: str | None = None) -> int:
     """
     Ensure an entity row exists; return its integer id.
-    Sessionless: opens its own session so callers can just pass (name, etype).
+    Accepts the two positional args the worker sends.
     """
-    with SessionLocal() as s:
-        row = s.scalars(select(Entity).where(Entity.name == name)).first()
-        if row:
-            if etype and getattr(row, "type", None) != etype:
-                s.execute(
-                    update(Entity)
-                    .where(Entity.id == row.id)
-                    .values(type=etype)
-                )
-                s.flush()
-                s.commit()
-            return row.id
+    row = s.execute(select(Entity).where(Entity.name == name)).scalar_one_or_none()
+    if row:
+        # optionally update type if provided
+        if etype and getattr(row, "type", None) != etype:
+            s.execute(
+                update(Entity)
+                .where(Entity.id == row.id)
+                .values(type=etype)
+            )
+            s.flush()
+        return row.id
 
-        new_id = s.execute(
-            insert(Entity).values(name=name, type=etype).returning(Entity.id)
-        ).scalar_one()
-        s.flush()
-        s.commit()
-        return new_id
+    ins = (
+        insert(Entity)
+        .values(name=name, type=etype)
+        .returning(Entity.id)
+    )
+    new_id = s.execute(ins).scalar_one()
+    s.flush()
+    return new_id
 
 
-def link_doc_entity(doc_id: uuid.UUID, ent_id: int, relation: str) -> None:
+def link_doc_entity(*, doc_id: uuid.UUID, ent_id: int, relation: str) -> None:
     """
     Create a (doc, entity, relation) link if it doesn't already exist.
-    Accepts positional args to match main.py calls.
     """
     rel = (relation or "").strip() or "mentions"
     with SessionLocal() as s:
@@ -183,7 +254,9 @@ def link_doc_entity(doc_id: uuid.UUID, ent_id: int, relation: str) -> None:
         s.commit()
 
 
-# ---------------- Graph query used by /graph/expand ----------------
+# --------------------------------------------------------------------------------------
+# Graph query used by /graph/expand
+# --------------------------------------------------------------------------------------
 
 def expand_graph(seed_ids: List[str], window_days: int = 30) -> Tuple[list, list]:
     """
@@ -195,7 +268,7 @@ def expand_graph(seed_ids: List[str], window_days: int = 30) -> Tuple[list, list
     edges: list = []
 
     with SessionLocal() as s:
-        # Recent documents (ignore NULL published_at)
+        # Recent documents
         docs = s.scalars(
             select(Document)
             .where((Document.published_at.is_not(None)) & (Document.published_at >= since))
