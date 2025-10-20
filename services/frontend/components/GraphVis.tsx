@@ -1,47 +1,66 @@
-"use client";
+// components/GraphVis.tsx
+import React, { useMemo } from "react";
 
-import { useEffect, useRef } from "react";
+type GraphData = {
+  nodes: Array<{ id: string; label?: string; type?: string }>;
+  edges: Array<{ source: string; target: string; label?: string }>;
+};
 
-type Node = { id: string; label: string; group?: string };
-type Edge = { from: string; to: string; label?: string };
+type Props = {
+  apiBase?: string;               // not used here, but harmless if passed
+  data: GraphData | null;
+};
 
-export default function GraphVis({ nodes, edges }: { nodes: Node[]; edges: Edge[] }) {
-  const ref = useRef<HTMLDivElement>(null);
+export default function GraphVis({ data }: Props) {
+  const graph = data && Array.isArray(data.nodes) && Array.isArray(data.edges) ? data : { nodes: [], edges: [] };
 
-  useEffect(() => {
-    if (!ref.current) return;
+  const layout = useMemo(() => {
+    const W = 900, H = 360, R = Math.min(W, H) / 2 - 40;
+    const n = Math.max(graph.nodes.length, 1);
+    const angle = (i: number) => (i / n) * 2 * Math.PI;
 
-    let network: any;
-    let resizeHandler: any;
+    const positions: Record<string, { x: number; y: number; node: any }> = {};
+    graph.nodes.forEach((node, i) => {
+      const a = angle(i);
+      const x = W / 2 + R * Math.cos(a);
+      const y = H / 2 + R * Math.sin(a);
+      positions[node.id] = { x, y, node };
+    });
+    return { W, H, positions };
+  }, [graph]);
 
-    (async () => {
-      // Dynamically import the ESM file export (bypasses the problematic directory import)
-      const vis = await import("vis-network/standalone/esm/vis-network");
+  const hasData = graph.nodes.length > 0;
 
-      const data = {
-        nodes: new vis.DataSet(nodes),
-        edges: new vis.DataSet(edges),
-      };
+  return (
+    <div>
+      <h3 style={{ marginTop: 0 }}>Graph</h3>
+      {!hasData && <div style={{ color: "#666" }}>No graph data yet. Run “Expand Graph” to see results.</div>}
 
-      const options = {
-        physics: { stabilization: true },
-        nodes: { shape: "dot", size: 18, font: { size: 14 } },
-        edges: { arrows: { to: { enabled: false } }, smooth: true },
-        interaction: { hover: true },
-      };
+      <svg width="100%" viewBox={`0 0 ${layout.W} ${layout.H}`} style={{ background: "#fafafa", borderRadius: 8 }}>
+        {/* Edges */}
+        {graph.edges.map((e, idx) => {
+          const s = layout.positions[e.source];
+          const t = layout.positions[e.target];
+          if (!s || !t) return null;
+          return <line key={`e-${idx}`} x1={s.x} y1={s.y} x2={t.x} y2={t.y} stroke="#9BB5FF" strokeWidth={2} />;
+        })}
 
-      network = new vis.Network(ref.current as HTMLDivElement, data, options);
+        {/* Nodes */}
+        {Object.values(layout.positions).map(({ x, y, node }, idx) => (
+          <g key={`n-${node.id}-${idx}`} transform={`translate(${x}, ${y})`}>
+            <circle r={20} fill="#7DA2FF" opacity={0.9} />
+            <text textAnchor="middle" dy="0.35em" fontSize="10" fill="#fff">
+              {node.type === "entity" ? (node.label || node.id).slice(0, 14) : (node.label || "Doc").slice(0, 14)}
+            </text>
+          </g>
+        ))}
+      </svg>
 
-      resizeHandler = () => network?.redraw();
-      window.addEventListener("resize", resizeHandler);
-    })();
-
-    return () => {
-      window.removeEventListener("resize", resizeHandler);
-      // @ts-ignore
-      network?.destroy?.();
-    };
-  }, [nodes, edges]);
-
-  return <div ref={ref} style={{ width: "100%", height: 420 }} />;
+      {hasData && (
+        <div style={{ marginTop: 8, fontFamily: "monospace" }}>
+          nodes: {graph.nodes.length} • edges: {graph.edges.length}
+        </div>
+      )}
+    </div>
+  );
 }

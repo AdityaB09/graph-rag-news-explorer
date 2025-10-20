@@ -2,12 +2,10 @@
 import React, { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 
-// Lazy-load client-only components
+// Client-only components
 const IngestPanel = dynamic(() => import("../components/IngestPanel"), { ssr: false });
 const ExpandPanel = dynamic(() => import("../components/ExpandPanel"), { ssr: false });
 const GraphVis    = dynamic(() => import("../components/GraphVis"), { ssr: false });
-const StoryGraph  = dynamic(() => import("../components/StoryGraph"), { ssr: false });
-const Timeline    = dynamic(() => import("../components/Timeline"), { ssr: false });
 
 type Health = { status: "ok" };
 type AdminStats = {
@@ -105,6 +103,7 @@ function AdminPanel() {
 
 export default function HomePage() {
   const [health, setHealth] = useState<"ok" | "down" | "loading">("loading");
+  const [expandData, setExpandData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -135,20 +134,10 @@ export default function HomePage() {
         </div>
 
         <div style={{ display: "grid", gridTemplateRows: "auto 1fr", gap: 16 }}>
-          <ExpandPanel apiBase={API} />
+          <ExpandPanel apiBase={API} onResult={setExpandData} />
           <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
-            {/* Your visualization (if it reads the same backend) */}
-            <GraphVis apiBase={API} />
+            <GraphVis apiBase={API} data={expandData} />
           </div>
-        </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginTop: 24 }}>
-        <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
-          <StoryGraph apiBase={API} />
-        </div>
-        <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
-          <Timeline apiBase={API} />
         </div>
       </div>
     </div>
