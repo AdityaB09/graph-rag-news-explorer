@@ -38,55 +38,42 @@ def health():
     return Health()
 
 
-def _ingest_single(url: str, title_hint: str | None = None, source: str = "") -> Dict[str, Any]:
-    """
-    Fetch a URL, persist as a Document, extract/link entities, and index.
-    Uses a proper SQLAlchemy Session for upsert_entity() (required by db.py).
-    """
+# at top
+from .db import init_schema, upsert_document, upsert_entity, link_doc_entity, expand_graph, SessionLocal
+from .nlp import extract_entities, embed
+
+def _ingest_single(url: str, title_hint: str | None = None, source: str = "") -> dict:
     page = fetch_url(url)
     title = title_hint or page.get("title") or url
     text = page.get("text") or ""
     published_at = page.get("published_at") or datetime.utcnow()
 
-    # persist doc (ORM)
-    doc_id = upsert_document(
-        url=url,
-        title=title,
-        source=source,
-        text=text,
-        published_at=published_at
-    )
+    # 1) persist/ensure doc
+    doc_id = upsert_document(url=url, title=title, source=source, text=text, published_at=published_at)
 
-    # NER → upsert entities with a real Session
-    ents = extract_entities(text)  # list[(name, type)]
-    ent_names: List[str] = []
-    if ents:
-        with SessionLocal() as s:
-            for name, etype in ents:
-                try:
-                    ent_id = upsert_entity(s, name, etype)
-                    link_doc_entity(doc_id=doc_id, ent_id=ent_id, relation="MENTION")
-                    ent_names.append(name)
-                except Exception as e:
-                    # Non-fatal; continue with other entities
-                    print(f"[entity-link] failed for '{name}': {e}")
+    # 2) NER (use title + text)
+    ents = extract_entities(text, title=title)  # <-- important
 
-    # embed + index (vector + metadata)
-    try:
-        vec = embed((title or "") + "\n" + text[:4000])
-        index_document(doc_id, title, url, source, published_at, entities=ent_names, embedding=vec)
-    except Exception as e:
-        # Indexing should not fail the ingestion
-        print(f"[index] failed for {url}: {e}")
+    ent_names: list[str] = []
+    # 3) Upsert entities + create links in ONE transaction
+    with SessionLocal() as s:
+        for name, etype in ents:
+            ent_id = upsert_entity(s, name, etype)
+            link_doc_entity(s, doc_id=doc_id, ent_id=ent_id, relation="MENTION")
+            ent_names.append(name)
+        s.commit()  # <-- single commit so FKs are satisfied
+
+    # 4) embed + index
+    vec = embed((title or "") + "\n" + text[:4000])
+    index_document(doc_id, title, url, source, published_at, entities=ent_names, embedding=vec)
 
     return {
         "doc_id": str(doc_id),
         "title": title,
         "url": url,
         "entities": ent_names,
-        "published_at": published_at.isoformat(),
+        "published_at": published_at.isoformat()
     }
-
 
 # ---------------------------
 # Topic ingestion (safe path)
@@ -221,3 +208,49 @@ def graph_expand(req: ExpandRequest):
         nodes=[GraphNode(**n) for n in nodes],
         edges=[GraphEdge(**e) for e in edges],
     )
+
+
+# --- Admin: Flush DB & reset index ------------------------------------------
+# --- Admin: Flush & Stats ----------------------------------------------------
+from sqlalchemy import text as sa_text, func, select
+from .db import engine, SessionLocal, Document, Entity, DocEntity
+
+@app.post("/admin/flush")
+def admin_flush():
+    """
+    Wipe all ingested data (documents, entities, links). Resets JOBS.
+    Tries TRUNCATE CASCADE (Postgres); falls back to DELETE.
+    """
+    with engine.begin() as conn:
+        try:
+            conn.execute(sa_text("TRUNCATE TABLE doc_entities, documents, entities RESTART IDENTITY CASCADE;"))
+        except Exception:
+            conn.execute(sa_text("DELETE FROM doc_entities;"))
+            conn.execute(sa_text("DELETE FROM documents;"))
+            conn.execute(sa_text("DELETE FROM entities;"))
+
+    JOBS.clear()
+
+    # Best-effort index reset (optional)
+    try:
+        from .search import reset_index, ensure_index
+        try:
+            reset_index()
+        except Exception:
+            ensure_index()
+    except Exception:
+        pass
+
+    from datetime import datetime
+    return {"status": "ok", "flushed_at": datetime.utcnow().isoformat() + "Z"}
+
+@app.get("/admin/stats")
+def admin_stats():
+    """
+    Return simple table counts to verify flush/ingest operations.
+    """
+    with SessionLocal() as s:
+        docs = s.scalar(select(func.count(Document.id))) or 0
+        ents = s.scalar(select(func.count(Entity.id))) or 0
+        links = s.scalar(select(func.count(DocEntity.id))) or 0
+    return {"status": "ok", "documents": int(docs), "entities": int(ents), "doc_entities": int(links)}
