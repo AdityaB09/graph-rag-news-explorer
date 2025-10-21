@@ -3,10 +3,10 @@ import React, { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 
 // Client-only components
-const IngestPanel  = dynamic(() => import("../components/IngestPanel"),  { ssr: false });
-const ExpandPanel  = dynamic(() => import("../components/ExpandPanel"),  { ssr: false });
+const IngestPanel = dynamic(() => import("../components/IngestPanel"), { ssr: false });
+const ExpandPanel = dynamic(() => import("../components/ExpandPanel"), { ssr: false });
+const GraphVis = dynamic(() => import("../components/GraphVis"), { ssr: false });
 const GraphSummary = dynamic(() => import("../components/GraphSummary"), { ssr: false });
-const GraphVis     = dynamic(() => import("../components/GraphVis"),     { ssr: false });
 
 type Health = { status: "ok" };
 type AdminStats = {
@@ -104,7 +104,7 @@ function AdminPanel() {
 
 export default function HomePage() {
   const [health, setHealth] = useState<"ok" | "down" | "loading">("loading");
-  const [expandData, setExpandData] = useState<{ nodes: any[]; edges: any[] } | null>(null);
+  const [expandData, setExpandData] = useState<{ nodes?: any[]; edges?: any[] } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -134,25 +134,23 @@ export default function HomePage() {
         </span>
       </div>
 
+      {/* Two columns: LEFT = ingest + admin + GRAPH ; RIGHT = expand + summary */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        {/* Left column */}
-        <div>
+        {/* LEFT column */}
+        <div style={{ display: "grid", gridTemplateRows: "auto auto 1fr", gap: 16 }}>
           <IngestPanel apiBase={API} />
           <AdminPanel />
+          {/* 👉 Graph sits directly below Admin now */}
+          <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16, minHeight: 420 }}>
+            <GraphVis apiBase={API} data={expandData} />
+          </div>
         </div>
 
-        {/* Right column */}
-        <div style={{ display: "grid", gap: 16 }}>
+        {/* RIGHT column */}
+        <div style={{ display: "grid", gridTemplateRows: "auto auto", gap: 16 }}>
           <ExpandPanel apiBase={API} onResult={setExpandData} />
-
-          {/* Summary card */}
           <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 16 }}>
             <GraphSummary data={expandData} />
-          </div>
-
-          {/* Graph card – explicit height so it always shows */}
-          <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 0, minHeight: 540 }}>
-            <GraphVis data={expandData} height={540} />
           </div>
         </div>
       </div>
