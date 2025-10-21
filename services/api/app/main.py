@@ -35,7 +35,10 @@ JOBS: Dict[str, Dict[str, Any]] = {}
 
 # init DB + index
 init_schema()
-ensure_index()
+try:
+    ensure_index()  # returns False when disabled; that's OK
+except Exception as e:
+    print(f"[main] ensure_index skipped/failed: {e}")
 
 
 @app.get("/health", response_model=Health)

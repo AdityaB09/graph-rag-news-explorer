@@ -1,99 +1,88 @@
 # services/api/app/search.py
+from __future__ import annotations
 import os
 from datetime import datetime
-from typing import Iterable, Optional, Any, Dict, List
+from typing import List, Optional
 
-from opensearchpy import OpenSearch, RequestsHttpConnection
-from opensearchpy.exceptions import TransportError
+INDEX_NAME = "news_docs"
 
-OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://opensearch:9200")
-INDEX_NAME = os.environ.get("OPENSEARCH_INDEX", "news_docs")
+OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "").strip()
+OPENSEARCH_USERNAME = os.getenv("OPENSEARCH_USERNAME", "").strip()
+OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "").strip()
 
-_os_client: Optional[OpenSearch] = None
-
-
-def _client() -> OpenSearch:
-    global _os_client
-    if _os_client is None:
-        _os_client = OpenSearch(
-            hosts=[OPENSEARCH_URL],
-            http_auth=None,
-            use_ssl=False,
-            verify_certs=False,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-            max_retries=3,
-            retry_on_timeout=True,
-        )
-    return _os_client
-
-
-def ensure_index() -> None:
-    """
-    Create index with a simple mapping. We store the embedding as a float array
-    (no k-NN plugin required), which avoids dense_vector / knn_vector issues.
-    """
-    os_client = _client()
+os_client = None
+if OPENSEARCH_URL:
     try:
-        if os_client.indices.exists(index=INDEX_NAME):
-            return
-    except TransportError:
-        # If security plugin returns 401 for exists, try creating anyway
-        pass
+        from opensearchpy import OpenSearch
+        # Basic connection; supports http or https
+        kwargs = {}
+        if OPENSEARCH_USERNAME and OPENSEARCH_PASSWORD:
+            kwargs["http_auth"] = (OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD)
+        if OPENSEARCH_URL.startswith("https://"):
+            kwargs.update(dict(use_ssl=True, verify_certs=True))
+        os_client = OpenSearch(hosts=[OPENSEARCH_URL], **kwargs)
+    except Exception as e:
+        print(f"[search] Failed to init OpenSearch client: {e}")
+        os_client = None
+else:
+    print("[search] OPENSEARCH_URL not set; search is DISABLED")
 
-    body = {
-        "settings": {
-            "index": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0,
-            }
-        },
-        "mappings": {
-            "properties": {
-                "title": {"type": "text"},
-                "url": {"type": "keyword"},
-                "source": {"type": "keyword"},
-                "published_at": {"type": "date"},
-                "entities": {"type": "keyword"},
-                # store embeddings as a plain float array
-                "embedding": {"type": "float"},
-            }
-        },
-    }
-
+def ensure_index() -> bool:
+    """Create the index if missing. Returns True if usable, False if disabled/unavailable."""
+    if not os_client:
+        return False
     try:
-        os_client.indices.create(index=INDEX_NAME, body=body)
-    except TransportError as e:
-        # ignore "resource_already_exists_exception"
-        err_type = getattr(e, "error", None) or ""
-        if "resource_already_exists_exception" not in str(err_type).lower():
-            raise
+        if not os_client.indices.exists(INDEX_NAME):
+            body = {
+                "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+                "mappings": {
+                    "properties": {
+                        "title": {"type": "text"},
+                        "url": {"type": "keyword"},
+                        "source": {"type": "keyword"},
+                        "published_at": {"type": "date"},
+                        "entities": {"type": "keyword"},
+                        "embedding": {"type": "dense_vector", "dims": 384, "index": False},
+                    }
+                },
+            }
+            os_client.indices.create(index=INDEX_NAME, body=body)
+        return True
+    except Exception as e:
+        print(f"[search] ensure_index error: {e}")
+        return False
 
+def reset_index():
+    if not os_client:
+        return
+    try:
+        if os_client.indices.exists(INDEX_NAME):
+            os_client.indices.delete(index=INDEX_NAME)
+    except Exception as e:
+        print(f"[search] reset_index error: {e}")
+    ensure_index()
 
 def index_document(
-    doc_id: Any,
-    title: Optional[str],
+    doc_id: str,
+    title: str,
     url: str,
-    source: Optional[str],
-    published_at: Optional[datetime],
-    *,
-    entities: Optional[Iterable[str]] = None,
-    embedding: Optional[Iterable[float]] = None,
-) -> Dict[str, Any]:
-    """
-    Upsert a doc into OpenSearch. Accepts extra fields used by callers.
-    """
-    doc: Dict[str, Any] = {
-        "title": title,
-        "url": url,
-        "source": source,
-        "published_at": published_at.isoformat() if published_at else None,
-    }
-    if entities is not None:
-        doc["entities"] = list(entities)
-    if embedding is not None:
-        # store as list[float]
-        doc["embedding"] = list(embedding)
-
-    res = _client().index(index=INDEX_NAME, id=str(doc_id), body=doc, refresh=True)
-    return res
+    source: str,
+    published_at,
+    entities: List[str],
+    embedding: Optional[list] = None,
+):
+    """Index a document if OpenSearch is configured; otherwise no-op."""
+    if not os_client:
+        return
+    try:
+        body = {
+            "title": title,
+            "url": url,
+            "source": source,
+            "published_at": published_at if isinstance(published_at, str) else (published_at or datetime.utcnow()),
+            "entities": entities or [],
+            "embedding": embedding or [],
+        }
+        os_client.index(index=INDEX_NAME, id=doc_id, body=body)
+    except Exception as e:
+        print(f"[search] index_document error: {e}")
