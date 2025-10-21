@@ -64,9 +64,9 @@ services:
   api:
     build: ./services/api
     environment:
+      REDIS_URL: ${REDIS_URL}
       DATABASE_URL: ${DATABASE_URL}
       OPENSEARCH_URL: http://opensearch:9200
-      REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
