@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@postgres:5432/postgres",
+    "postgresql://neondb_owner:npg_doAYeECs8U1n@ep-nameless-resonance-a4jiv5og-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)

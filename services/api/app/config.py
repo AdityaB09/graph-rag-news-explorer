@@ -6,7 +6,7 @@ OPENSEARCH_PASSWORD: str | None = os.getenv("OPENSEARCH_PASSWORD") or None
 
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg2://postgres:postgres@postgres:5432/postgres",
+    "postgresql://neondb_owner:npg_doAYeECs8U1n@ep-nameless-resonance-a4jiv5og-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
 )
 
 REDIS_URL: str | None = os.getenv("REDIS_URL") or None

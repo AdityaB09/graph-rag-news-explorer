@@ -64,7 +64,7 @@ services:
   api:
     build: ./services/api
     environment:
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: ${DATABASE_URL}
       OPENSEARCH_URL: http://opensearch:9200
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
@@ -105,7 +105,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_PUBLIC_API_URL:  ${NEXT_PUBLIC_API_URL}
     depends_on:
       api:
         condition: service_started
