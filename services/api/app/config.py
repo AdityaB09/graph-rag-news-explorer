@@ -25,3 +25,16 @@ CORS_ORIGINS = [
 
 ENV: str = os.getenv("ENV", "dev")
 DEBUG: bool = os.getenv("DEBUG", "0") in ("1", "true", "True")
+
+# Browser-like UA so publishers don't block Render fetches
+FETCH_UA = os.getenv(
+    "FETCH_UA",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# Keep short articles instead of dropping everything
+MIN_CONTENT_LEN = int(os.getenv("MIN_CONTENT_LEN", "300"))
+
+# Upper bound to avoid overloading free tiers (still generous)
+MAX_ITEMS_CAP = int(os.getenv("MAX_ITEMS_CAP", "60"))
