@@ -14,4 +14,4 @@ opensearch-py==2.6.0
 python-dotenv==1.0.1
 starlette==0.38.5
 rq==1.16.1
-
+redis>=5.0.1

@@ -37,3 +37,19 @@ export async function jobStatus(job_id: string) {
   const { data } = await axios.get(`${API_BASE}/jobs/${job_id}`);
   return data as { job_id: string; status: string; result?: any };
 }
+
+// const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080";
+
+export async function health(): Promise<{ status: string; search_enabled?: boolean }> {
+  const r = await fetch(`${API_BASE}/health`, { cache: "no-store" });
+  if (!r.ok) throw new Error("health failed");
+  return r.json();
+}
+
+export async function recentDocs(limit = 50): Promise<{ status: string; items: Array<{
+  id: string; title: string; url: string; source: string; published_at: string | null;
+}>}> {
+  const r = await fetch(`${API_BASE}/admin/recent_docs?limit=${limit}`, { cache: "no-store" });
+  if (!r.ok) throw new Error("recent_docs failed");
+  return r.json();
+}

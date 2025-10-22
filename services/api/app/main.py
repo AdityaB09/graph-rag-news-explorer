@@ -8,10 +8,10 @@ from uuid import uuid4
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from sqlalchemy import text as sa_text, func, select
+from sqlalchemy import text as sa_text, func, select, desc
 
 from .schemas import (
     Health, IngestTopicRequest, IngestRssRequest, IngestUrlRequest,
@@ -27,18 +27,33 @@ from .nlp import extract_entities, embed
 from .search import index_document, ensure_index
 
 # --------------------------------------------------------------------------------------
-# Job store (Redis-backed with in-memory fallback) so /jobs/{id} survives restarts
+# Job store (Redis-backed with in-memory fallback)
 # --------------------------------------------------------------------------------------
 
-REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_REST_URL")
+REDIS_URL = (os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 _redis = None
 if REDIS_URL:
     try:
-        import redis  # requires `redis` in requirements.txt
-        _redis = redis.from_url(REDIS_URL, decode_responses=True, ssl=REDIS_URL.startswith("rediss://"))
+        import redis  # make sure requirements.txt has: redis>=5.0.1
+        from redis.connection import SSLConnection
+
+        # Upstash uses TLS (rediss://). Using SSLConnection avoids the 'ssl' kwarg issue.
+        kwargs = dict(
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
+        if REDIS_URL.startswith("rediss://"):
+            kwargs["connection_class"] = SSLConnection
+
+        _redis = redis.Redis.from_url(REDIS_URL, **kwargs)
+        _redis.ping()
+        print("[jobs] Redis connected")
     except Exception as _e:
         print(f"[jobs] Redis unavailable ({type(_e).__name__}: {_e}); falling back to memory.")
         _redis = None
+else:
+    print("[jobs] REDIS_URL not set; using in-memory jobs")
 
 _memory_jobs: Dict[str, Dict[str, Any]] = {}
 
@@ -73,7 +88,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# init DB + index
+# init DB + (optional) vector index
 init_schema()
 try:
     ensure_index()  # returns False when disabled; that's OK
@@ -99,9 +114,9 @@ def _ingest_single(url: str, title_hint: str | None = None, source: str = "") ->
     # 1) persist/ensure doc
     doc_id = upsert_document(url=url, title=title, source=source, text=text, published_at=published_at)
 
-    # 2) NER (title + text, if your nlp.extract_entities accepts title arg)
+    # 2) NER (title + text, if nlp.extract_entities supports it)
     try:
-        ents = extract_entities(text, title=title)  # your nlp.py may accept (text, title=...)
+        ents = extract_entities(text, title=title)
     except TypeError:
         ents = extract_entities(text)
 
@@ -114,12 +129,12 @@ def _ingest_single(url: str, title_hint: str | None = None, source: str = "") ->
             ent_names.append(name)
         s.commit()
 
-    # 4) embed + index (best effort; ensure_index() may disable it)
+    # 4) embed + index (best-effort)
     vec = embed((title or "") + "\n" + text[:4000])
     try:
         index_document(doc_id, title, url, source, published_at, entities=ent_names, embedding=vec)
-    except Exception as _e:
-        # search can be disabled; don't fail ingestion because of indexing
+    except Exception:
+        # search can be disabled or unreachable; don't fail ingestion because of indexing
         pass
 
     return {
@@ -142,11 +157,14 @@ def ingest_topic(req: IngestTopicRequest, background_tasks: BackgroundTasks):
 
     def work():
         try:
-            t = fetch_topic(req.topic)  # {"items": [...], "source_used": ..., "attempts":[...]}
+            t = fetch_topic(req.topic)  # {"items":[...], "source_used":..., "attempts":[...]}
             items = t.get("items") or []
             results = []
             for item in items[:20]:
-                results.append(_ingest_single(item["url"], item.get("title"), source=f"topic:{t.get('source_used') or 'unknown'}"))
+                results.append(
+                    _ingest_single(item["url"], item.get("title"),
+                                   source=f"topic:{t.get('source_used') or 'unknown'}")
+                )
             _jobs_set(job_id, "done", {
                 "count": len(results),
                 "source_used": t.get("source_used"),
@@ -229,7 +247,7 @@ def graph_expand(req: ExpandRequest):
 
 
 # --------------------------------------------------------------------------------------
-# Admin: Flush, Stats, Entities
+# Admin: Flush, Stats, Entities, Recent Docs
 # --------------------------------------------------------------------------------------
 
 @app.post("/admin/flush")
@@ -291,3 +309,19 @@ def admin_entities(limit: int = 50):
             "links": int(cnt),
         })
     return {"status": "ok", "entities": out}
+
+
+@app.get("/admin/recent_docs")
+def recent_docs(limit: int = Query(50, ge=1, le=500)):
+    with SessionLocal() as s:
+        rows = (
+            s.query(Document.id, Document.title, Document.url, Document.source, Document.published_at)
+             .order_by(desc(Document.published_at))
+             .limit(limit)
+             .all()
+        )
+    return {"status": "ok", "items": [
+        {"id": str(r.id), "title": r.title, "url": r.url, "source": r.source,
+         "published_at": (r.published_at.isoformat() if r.published_at else None)}
+        for r in rows
+    ]}
