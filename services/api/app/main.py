@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import traceback
 from uuid import uuid4
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -12,6 +13,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy import text as sa_text, func, select, desc
+from sqlalchemy.exc import SQLAlchemyError
 
 from .schemas import (
     Health, IngestTopicRequest, IngestRssRequest, IngestUrlRequest,
@@ -26,60 +28,65 @@ from .crawler import fetch_url, fetch_rss, fetch_topic
 from .nlp import extract_entities, embed
 from .search import index_document, ensure_index
 
-
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # Job store (Redis-backed with in-memory fallback) so /jobs/{id} survives restarts
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
-# Use only a real Redis TCP URL (redis:// or rediss://). Do NOT pass Upstash REST https:// here.
-REDIS_URL = os.getenv("REDIS_URL")  # e.g. rediss://:password@host:6379
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("UPSTASH_REDIS_REST_URL")
 _redis = None
-if REDIS_URL and (REDIS_URL.startswith("redis://") or REDIS_URL.startswith("rediss://")):
+_redis_info_err: Optional[str] = None
+
+if REDIS_URL:
     try:
-        import redis
+        import redis  # make sure redis>=5.0.0 is in requirements.txt
+        # IMPORTANT: do NOT pass 'ssl='; older redis/Conn classes error out.
         _redis = redis.from_url(REDIS_URL, decode_responses=True)
-        print("[jobs] Redis enabled via", REDIS_URL.split("://", 1)[0])
     except Exception as _e:
-        print(f"[jobs] Redis disabled ({type(_e).__name__}: {_e}); using in-memory jobs store.")
+        _redis_info_err = f"Redis init failed: {type(_e).__name__}: {_e}"
+        print(f"[jobs] Redis unavailable: {_redis_info_err}; falling back to memory.")
         _redis = None
 else:
-    print("[jobs] No valid Redis socket URL provided; using in-memory jobs store.")
+    _redis_info_err = "REDIS_URL not set (using in-memory jobs)."
 
 _memory_jobs: Dict[str, Dict[str, Any]] = {}
 
 def _job_key(job_id: str) -> str:
     return f"jobs:{job_id}"
 
-def _jobs_set(job_id: str, status: str, result: Optional[dict] = None, ttl_s: int = 24 * 3600) -> None:
-    doc = {"status": status, "result": result or {}, "ts": time.time()}
-    if _redis:
-        try:
+def _jobs_set(job_id: str, status: str, result: Optional[dict] = None,
+              ttl_s: int = 24 * 3600, progress: Optional[dict] = None) -> None:
+    doc = {
+        "status": status,
+        "result": result or {},
+        "progress": progress or {},
+        "ts": time.time(),
+    }
+    try:
+        if _redis:
             _redis.setex(_job_key(job_id), ttl_s, json.dumps(doc))
-        except Exception as _e:
-            # Fallback to memory on transient Redis errors
-            print(f"[jobs] Redis setex failed ({type(_e).__name__}: {_e}); falling back to memory for {job_id}")
+        else:
             _memory_jobs[job_id] = doc
-    else:
-        _memory_jobs[job_id] = doc
+    except Exception as e:
+        print(f"[jobs] _jobs_set error: {e}\n{traceback.format_exc()}")
+        _memory_jobs[job_id] = doc  # always keep a memory copy as fallback
 
 def _jobs_get(job_id: str) -> Optional[dict]:
-    if _redis:
-        try:
+    try:
+        if _redis:
             raw = _redis.get(_job_key(job_id))
             return json.loads(raw) if raw else None
-        except Exception as _e:
-            print(f"[jobs] Redis get failed ({type(_e).__name__}: {_e}); trying memory for {job_id}")
-            return _memory_jobs.get(job_id)
-    return _memory_jobs.get(job_id)
+        return _memory_jobs.get(job_id)
+    except Exception as e:
+        print(f"[jobs] _jobs_get error: {e}\n{traceback.format_exc()}")
+        return _memory_jobs.get(job_id)
 
 def _jobs_clear_all_memory_only() -> None:
-    # Only clears memory store (used by /admin/flush); Redis keys expire via TTL
-    _memory_jobs.clear()
+    _memory_jobs.clear()  # Redis keys expire via TTL; we don’t clear Redis here
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # FastAPI app + CORS
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 app = FastAPI(title="Graph-RAG News Explorer (real)")
 app.add_middleware(
@@ -94,48 +101,102 @@ try:
 except Exception as e:
     print(f"[main] ensure_index skipped/failed: {e}")
 
-
 @app.get("/health", response_model=Health)
 def health():
     return Health()
 
+# Deep infra checks endpoint
+@app.get("/admin/checks")
+def admin_checks():
+    checks: dict[str, Any] = {
+        "env": {
+            "REDIS_URL_set": bool(REDIS_URL),
+            "DATABASE_URL_set": bool(os.getenv("DATABASE_URL")),
+            "search_enabled": True,
+        },
+        "redis": {"ok": False, "error": _redis_info_err},
+        "db": {"ok": False},
+        "versions": {},
+    }
 
-# ======================================================================================
+    # Redis ping
+    if _redis:
+        try:
+            pong = _redis.ping()
+            checks["redis"] = {"ok": bool(pong), "ping": pong, "error": None}
+        except Exception as e:
+            checks["redis"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # DB check
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+        checks["db"]["ok"] = True
+    except Exception as e:
+        checks["db"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # Package versions (best effort)
+    try:
+        import fastapi, sqlalchemy, redis as redis_mod
+        checks["versions"]["fastapi"] = getattr(fastapi, "__version__", "unknown")
+        checks["versions"]["sqlalchemy"] = getattr(sqlalchemy, "__version__", "unknown")
+        checks["versions"]["redis"] = getattr(redis_mod, "__version__", "unknown")
+    except Exception:
+        pass
+
+    return {"status": "ok", "checks": checks}
+
+
+# --------------------------------------------------------------------------------------
 # Core ingest worker
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 def _ingest_single(url: str, title_hint: str | None = None, source: str = "") -> dict:
+    print(f"[ingest] fetch_url -> {url}")
     page = fetch_url(url)
     title = title_hint or page.get("title") or url
     text = page.get("text") or ""
     published_at = page.get("published_at") or datetime.utcnow()
 
     # 1) persist/ensure doc
-    doc_id = upsert_document(url=url, title=title, source=source, text=text, published_at=published_at)
-
-    # 2) NER (title + text, if nlp.extract_entities accepts title arg)
     try:
-        ents = extract_entities(text, title=title)
-    except TypeError:
-        ents = extract_entities(text)
+        doc_id = upsert_document(url=url, title=title, source=source, text=text, published_at=published_at)
+    except SQLAlchemyError as db_err:
+        print(f"[ingest] upsert_document DB error: {db_err}\n{traceback.format_exc()}")
+        raise
+
+    # 2) NER
+    try:
+        try:
+            ents = extract_entities(text, title=title)
+        except TypeError:
+            ents = extract_entities(text)
+    except Exception as nlp_err:
+        print(f"[ingest] extract_entities error: {nlp_err}\n{traceback.format_exc()}")
+        ents = []
 
     ent_names: list[str] = []
-    # 3) Upsert entities + create links in ONE transaction
-    with SessionLocal() as s:
-        for name, etype in ents:
-            ent_id = upsert_entity(s, name, etype)
-            link_doc_entity(s, doc_id=doc_id, ent_id=ent_id, relation="MENTION")
-            ent_names.append(name)
-        s.commit()
+    # 3) Upsert entities + create links
+    try:
+        with SessionLocal() as s:
+            for name, etype in ents:
+                ent_id = upsert_entity(s, name, etype)
+                link_doc_entity(s, doc_id=doc_id, ent_id=ent_id, relation="MENTION")
+                ent_names.append(name)
+            s.commit()
+    except SQLAlchemyError as db_err:
+        print(f"[ingest] entity/link DB error: {db_err}\n{traceback.format_exc()}")
+        raise
 
-    # 4) embed + index (best effort; ensure_index() may disable it)
+    # 4) embed + index (best effort)
     vec = embed((title or "") + "\n" + text[:4000])
     try:
         index_document(doc_id, title, url, source, published_at, entities=ent_names, embedding=vec)
-    except Exception:
+    except Exception as _e:
         # search can be disabled; don't fail ingestion because of indexing
-        pass
+        print(f"[ingest] index_document warning: {_e}")
 
+    print(f"[ingest] OK -> doc_id={doc_id} title={title!r}")
     return {
         "doc_id": str(doc_id),
         "title": title,
@@ -145,209 +206,115 @@ def _ingest_single(url: str, title_hint: str | None = None, source: str = "") ->
     }
 
 
-# ======================================================================================
-# Topic ingestion (robust progress + per-item error isolation)
-# ======================================================================================
+# --------------------------------------------------------------------------------------
+# Topic ingestion
+# --------------------------------------------------------------------------------------
 
 @app.post("/ingest/topic", response_model=JobCreateResponse)
 def ingest_topic(req: IngestTopicRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid4())
-    _jobs_set(job_id, "queued", {"progress": 0, "total": 0})
-    print(f"[ingest_topic] QUEUED job={job_id} topic={req.topic!r}")
+    _jobs_set(job_id, "queued", progress={"stage": "queued", "done": 0, "total": 0})
 
     def work():
         try:
-            print(f"[ingest_topic] START job={job_id} topic={req.topic!r}")
+            _jobs_set(job_id, "running", progress={"stage": "fetch_topic"})
             t = fetch_topic(req.topic)  # {"items": [...], "source_used": ..., "attempts":[...]}
             items = t.get("items") or []
             total = min(len(items), 20)
-            results: List[Dict[str, Any]] = []
-            errors: List[Dict[str, Any]] = []
+            _jobs_set(job_id, "running", progress={"stage": "ingest", "done": 0, "total": total})
 
-            _jobs_set(job_id, "running", {
-                "progress": 0,
-                "total": total,
-                "source_used": t.get("source_used"),
-                "attempts": t.get("attempts", []),
-            })
-
-            for idx, item in enumerate(items[:total], start=1):
-                url = item.get("url")
-                ttl = item.get("title")
+            results = []
+            for i, item in enumerate(items[:20], start=1):
                 try:
-                    if not url:
-                        raise ValueError("missing url")
-                    res = _ingest_single(url, ttl, source=f"topic:{t.get('source_used') or 'unknown'}")
+                    res = _ingest_single(item["url"], item.get("title"),
+                                         source=f"topic:{t.get('source_used') or 'unknown'}")
                     results.append(res)
-                    print(f"[ingest_topic] OK ({idx}/{total}) {url}")
                 except Exception as e:
-                    msg = f"{type(e).__name__}: {e}"
-                    errors.append({"url": url, "error": msg})
-                    print(f"[ingest_topic] ERR ({idx}/{total}) {url} -> {msg}")
+                    print(f"[ingest_topic] item error: {e}\n{traceback.format_exc()}")
                 finally:
-                    _jobs_set(job_id, "running", {
-                        "progress": idx,
-                        "total": total,
-                        "source_used": t.get("source_used"),
-                        "attempts": t.get("attempts", []),
-                        "ingested_so_far": len(results),
-                        "errors_so_far": len(errors),
-                    })
+                    _jobs_set(job_id, "running", progress={"stage": "ingest", "done": i, "total": total})
 
             _jobs_set(job_id, "done", {
                 "count": len(results),
                 "source_used": t.get("source_used"),
                 "attempts": t.get("attempts", []),
                 "ingested": results,
-                "errors": errors,
-            })
-            print(f"[ingest_topic] DONE job={job_id} ingested={len(results)} errors={len(errors)}")
+            }, progress={"stage": "complete", "done": total, "total": total})
 
         except Exception as e:
-            _jobs_set(job_id, "error", {"error": str(e)})
-            print(f"[ingest_topic] FATAL job={job_id} -> {type(e).__name__}: {e}")
+            print(f"[ingest_topic] fatal error: {e}\n{traceback.format_exc()}")
+            _jobs_set(job_id, "error", {"error": str(e)}, progress={"stage": "error"})
 
     background_tasks.add_task(work)
     return JobCreateResponse(job_id=job_id)
 
 
-# (Optional) synchronous endpoint for debugging environments where BackgroundTasks
-# are killed or multiple workers split memory job-state. Call this to prove ingestion.
-@app.post("/ingest/topic/sync", response_model=JobCreateResponse)
-def ingest_topic_sync(req: IngestTopicRequest):
-    job_id = str(uuid4())
-    _jobs_set(job_id, "running", {"progress": 0, "total": 0})
-    print(f"[ingest_topic/sync] START job={job_id} topic={req.topic!r}")
-
-    try:
-        t = fetch_topic(req.topic)
-        items = t.get("items") or []
-        total = min(len(items), 20)
-        results: List[Dict[str, Any]] = []
-        errors: List[Dict[str, Any]] = []
-
-        for idx, item in enumerate(items[:total], start=1):
-            url = item.get("url")
-            ttl = item.get("title")
-            try:
-                if not url:
-                    raise ValueError("missing url")
-                res = _ingest_single(url, ttl, source=f"topic:{t.get('source_used') or 'unknown'}")
-                results.append(res)
-                print(f"[ingest_topic/sync] OK ({idx}/{total}) {url}")
-            except Exception as e:
-                msg = f"{type(e).__name__}: {e}"
-                errors.append({"url": url, "error": msg})
-                print(f"[ingest_topic/sync] ERR ({idx}/{total}) {url} -> {msg}")
-            finally:
-                _jobs_set(job_id, "running", {
-                    "progress": idx,
-                    "total": total,
-                    "ingested_so_far": len(results),
-                    "errors_so_far": len(errors),
-                })
-
-        _jobs_set(job_id, "done", {
-            "count": len(results),
-            "source_used": t.get("source_used"),
-            "attempts": t.get("attempts", []),
-            "ingested": results,
-            "errors": errors,
-        })
-        print(f"[ingest_topic/sync] DONE job={job_id} ingested={len(results)} errors={len(errors)}")
-
-    except Exception as e:
-        _jobs_set(job_id, "error", {"error": str(e)})
-        print(f"[ingest_topic/sync] FATAL job={job_id} -> {type(e).__name__}: {e}")
-
-    return JobCreateResponse(job_id=job_id)
-
-
-# ======================================================================================
-# RSS ingestion (robust per-item)
-# ======================================================================================
+# --------------------------------------------------------------------------------------
+# RSS ingestion
+# --------------------------------------------------------------------------------------
 
 @app.post("/ingest/rss", response_model=JobCreateResponse)
 def ingest_rss(req: IngestRssRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid4())
-    _jobs_set(job_id, "queued", {"progress": 0, "total": 0})
-    print(f"[ingest_rss] QUEUED job={job_id} rss={req.rss_url!r}")
+    _jobs_set(job_id, "queued", progress={"stage": "queued", "done": 0, "total": 0})
 
     def work():
         try:
-            print(f"[ingest_rss] START job={job_id} rss={req.rss_url!r}")
+            _jobs_set(job_id, "running", progress={"stage": "fetch_rss"})
             items, diag = fetch_rss(req.rss_url)
             total = min(len(items), 30)
+            _jobs_set(job_id, "running", progress={"stage": "ingest", "done": 0, "total": total})
+
             results: List[Dict[str, Any]] = []
-            errors: List[Dict[str, Any]] = []
-
-            _jobs_set(job_id, "running", {"progress": 0, "total": total, "diag": diag})
-
-            for idx, item in enumerate(items[:total], start=1):
-                url = item.get("url")
-                ttl = item.get("title")
+            for i, item in enumerate(items[:30], start=1):
                 try:
-                    if not url:
-                        raise ValueError("missing url")
-                    res = _ingest_single(url, ttl, source=req.rss_url)
+                    res = _ingest_single(item["url"], item.get("title"), source=req.rss_url)
                     results.append(res)
-                    print(f"[ingest_rss] OK ({idx}/{total}) {url}")
                 except Exception as e:
-                    msg = f"{type(e).__name__}: {e}"
-                    errors.append({"url": url, "error": msg})
-                    print(f"[ingest_rss] ERR ({idx}/{total}) {url} -> {msg}")
+                    print(f"[ingest_rss] item error: {e}\n{traceback.format_exc()}")
                 finally:
-                    _jobs_set(job_id, "running", {
-                        "progress": idx,
-                        "total": total,
-                        "diag": diag,
-                        "ingested_so_far": len(results),
-                        "errors_so_far": len(errors),
-                    })
+                    _jobs_set(job_id, "running", progress={"stage": "ingest", "done": i, "total": total})
 
             _jobs_set(job_id, "done", {
                 "count": len(results),
                 "diag": diag,
-                "ingested": results,
-                "errors": errors,
-            })
-            print(f"[ingest_rss] DONE job={job_id} ingested={len(results)} errors={len(errors)}")
+                "ingested": results
+            }, progress={"stage": "complete", "done": total, "total": total})
 
         except Exception as e:
-            _jobs_set(job_id, "error", {"error": str(e)})
-            print(f"[ingest_rss] FATAL job={job_id} -> {type(e).__name__}: {e}")
+            print(f"[ingest_rss] fatal error: {e}\n{traceback.format_exc()}")
+            _jobs_set(job_id, "error", {"error": str(e)}, progress={"stage": "error"})
 
     background_tasks.add_task(work)
     return JobCreateResponse(job_id=job_id)
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # Single URL ingestion
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 @app.post("/ingest/url", response_model=JobCreateResponse)
 def ingest_url(req: IngestUrlRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid4())
-    _jobs_set(job_id, "queued")
-    print(f"[ingest_url] QUEUED job={job_id} url={req.url!r}")
+    _jobs_set(job_id, "queued", progress={"stage": "queued", "done": 0, "total": 1})
 
     def work():
         try:
-            print(f"[ingest_url] START job={job_id} url={req.url!r}")
+            _jobs_set(job_id, "running", progress={"stage": "ingest", "done": 0, "total": 1})
             result = _ingest_single(req.url, source="single-url")
-            _jobs_set(job_id, "done", {"ingested": [result]})
-            print(f"[ingest_url] DONE job={job_id}")
+            _jobs_set(job_id, "done", {"ingested": [result]},
+                      progress={"stage": "complete", "done": 1, "total": 1})
         except Exception as e:
-            _jobs_set(job_id, "error", {"error": str(e)})
-            print(f"[ingest_url] FATAL job={job_id} -> {type(e).__name__}: {e}")
+            print(f"[ingest_url] fatal error: {e}\n{traceback.format_exc()}")
+            _jobs_set(job_id, "error", {"error": str(e)}, progress={"stage": "error"})
 
     background_tasks.add_task(work)
     return JobCreateResponse(job_id=job_id)
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # Jobs & Graph
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def jobs(job_id: str):
@@ -355,7 +322,6 @@ def jobs(job_id: str):
     if not j:
         raise HTTPException(404, "job not found")
     return JobStatusResponse(job_id=job_id, status=j["status"], result=j.get("result"))
-
 
 @app.post("/graph/expand", response_model=ExpandResponse)
 def graph_expand(req: ExpandRequest):
@@ -366,9 +332,9 @@ def graph_expand(req: ExpandRequest):
     )
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # Admin: Flush, Stats, Entities, Recent Docs
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 @app.post("/admin/flush")
 def admin_flush():
@@ -399,7 +365,6 @@ def admin_flush():
 
     return {"status": "ok", "flushed_at": datetime.utcnow().isoformat() + "Z"}
 
-
 @app.get("/admin/stats")
 def admin_stats():
     with SessionLocal() as s:
@@ -407,7 +372,6 @@ def admin_stats():
         ents = s.scalar(select(func.count(Entity.id))) or 0
         links = s.scalar(select(func.count(DocEntity.id))) or 0
     return {"status": "ok", "documents": int(docs), "entities": int(ents), "doc_entities": int(links)}
-
 
 @app.get("/admin/entities")
 def admin_entities(limit: int = 50):
@@ -430,7 +394,6 @@ def admin_entities(limit: int = 50):
         })
     return {"status": "ok", "entities": out}
 
-
 @app.get("/admin/recent_docs")
 def recent_docs(limit: int = Query(50, ge=1, le=500)):
     with SessionLocal() as s:
@@ -441,7 +404,11 @@ def recent_docs(limit: int = Query(50, ge=1, le=500)):
              .all()
         )
     return {"status": "ok", "items": [
-        {"id": str(r.id), "title": r.title, "url": r.url, "source": r.source,
-         "published_at": (r.published_at.isoformat() if r.published_at else None)}
-        for r in rows
+        {
+            "id": str(r.id),
+            "title": r.title,
+            "url": r.url,
+            "source": r.source,
+            "published_at": (r.published_at.isoformat() if r.published_at else None),
+        } for r in rows
     ]}
